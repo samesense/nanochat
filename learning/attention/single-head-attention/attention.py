@@ -18,7 +18,25 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+
+def softmax(scores):
+    """Softmax over the last dimension, written out by hand.
+
+        softmax(x)_i = exp(x_i) / sum_j exp(x_j)
+
+    turns a row of arbitrary numbers into a probability distribution: every
+    entry is positive and the row sums to 1.
+
+    The one subtlety is numerical stability. exp() overflows for large inputs,
+    so we first subtract each row's max. This changes nothing mathematically --
+    exp(x_i - m) / sum_j exp(x_j - m) cancels the exp(-m) top and bottom and
+    equals the formula above -- but now the largest exponent is exp(0) = 1, so
+    nothing overflows.
+    """
+    scores = scores - scores.max(dim=-1, keepdim=True).values  # (T, 1) broadcast
+    exp = scores.exp()
+    return exp / exp.sum(dim=-1, keepdim=True)
 
 
 def attention(q, k, v):
@@ -37,7 +55,7 @@ def attention(q, k, v):
 
     # Softmax over each ROW: row i becomes a probability distribution describing
     # how token i splits its attention across all tokens j. Rows sum to 1.
-    weights = F.softmax(scores, dim=-1)
+    weights = softmax(scores)
 
     # Blend the value vectors using those weights.
     # (T, T) @ (T, C) -> (T, C)

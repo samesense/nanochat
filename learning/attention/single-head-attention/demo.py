@@ -9,11 +9,19 @@ checks the two invariants that define vanilla attention:
 """
 
 import torch
+import torch.nn.functional as F
 
-from attention import SingleHeadSelfAttention, attention
+from attention import SingleHeadSelfAttention, attention, softmax
 
 torch.manual_seed(0)
 torch.set_printoptions(precision=2, sci_mode=False)
+
+
+# 0) Our hand-written softmax matches PyTorch's ------------------------------
+# We only use the library version here as a correctness oracle, not in attention.
+probe = torch.randn(4, 4) * 50  # large values: exercises the overflow-safe path
+assert torch.allclose(softmax(probe), F.softmax(probe, dim=-1), atol=1e-6)
+print("[softmax] hand-written softmax matches torch (even for large inputs)")
 
 T, C = 4, 8  # 4 tokens, 8-dim embeddings -- small enough to print
 x = torch.randn(T, C)

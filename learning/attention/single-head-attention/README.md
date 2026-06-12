@@ -38,6 +38,24 @@ That's why every row sums to 1. The demo prints this matrix so you can see it.
 `weights @ v` then takes, for each token *i*, a weighted average of all value
 vectors using row *i* as the weights — `(T, T) @ (T, C) -> (T, C)`.
 
+## Softmax, by hand
+
+To keep the math fully visible, `softmax` is implemented here rather than called
+from a library:
+
+```python
+scores = scores - scores.max(dim=-1, keepdim=True).values  # stability
+exp = scores.exp()
+weights = exp / exp.sum(dim=-1, keepdim=True)
+```
+
+The definition is `softmax(x)_i = exp(x_i) / Σ_j exp(x_j)`. The only extra step
+is subtracting each row's max first: `exp()` overflows on large inputs, and
+subtracting a constant `m` cancels top and bottom (`exp(x_i - m) / Σ exp(x_j - m)`
+equals the plain formula) while guaranteeing the largest exponent is `exp(0) = 1`.
+The demo checks this hand-written version against PyTorch's on deliberately large
+inputs.
+
 ## How this grows up
 
 This is deliberately the floor. Each step toward the real model adds one axis or
