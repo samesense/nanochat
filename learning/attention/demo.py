@@ -4,10 +4,12 @@ Guided demo of the extracted attention layer.
     pip install torch
     python demo.py
 
-It checks the three things an interviewer would actually probe:
+It checks the things an interviewer would actually probe:
   1) Shapes flow through correctly (GQA: many Q heads, few K/V heads).
-  2) Causality holds: a token's output never depends on future tokens.
-  3) The KV cache gives the same answer as a full forward pass, token by token.
+  2) The manual attention formula matches PyTorch SDPA.
+  3) Causality holds: a token's output never depends on future tokens.
+  4) The KV cache gives the same answer as a full forward pass, token by token.
+  5) Sliding-window masking affects only the expected local range.
 """
 
 import torch
@@ -34,7 +36,19 @@ print(f"[shapes]   in {tuple(x.shape)} -> out {tuple(y.shape)}  "
 assert y.shape == x.shape
 
 
-# 2) Causality ----------------------------------------------------------------
+# 2) Manual attention == SDPA --------------------------------------------------
+# The layer normally uses PyTorch's fused scaled_dot_product_attention. For
+# learning, attention.py also includes a direct implementation of:
+#   softmax(Q K^T / sqrt(d) + mask) V
+with torch.no_grad():
+    y_manual = attn(x, cos, sin, window=-1, use_manual=True)
+backend_diff = (y - y_manual).abs().max().item()
+print(f"[manual]   max |SDPA - manual| = {backend_diff:.2e}")
+assert backend_diff < 1e-5, "manual attention diverged from SDPA"
+print("[manual]   explicit attention formula matches SDPA")
+
+
+# 3) Causality ----------------------------------------------------------------
 # Perturb only the LAST token of the input. Outputs at every earlier position
 # must be byte-for-byte identical, because causal attention can't look forward.
 with torch.no_grad():
@@ -48,7 +62,7 @@ assert not changed[:, :-1].any(), "causality violated: past attended to the futu
 print("[causal]   only the last position changed -> causal mask is correct")
 
 
-# 3) KV cache == full forward -------------------------------------------------
+# 4) KV cache == full forward -------------------------------------------------
 # Feed the sequence one token at a time through the cache and confirm we recover
 # the same outputs as the single full-sequence forward pass above.
 with torch.no_grad():
@@ -65,7 +79,7 @@ assert max_diff < 1e-4, "KV cache diverged from the full forward pass"
 print("[kvcache]  incremental decoding matches the full forward pass")
 
 
-# 4) Sliding window ----------------------------------------------------------
+# 5) Sliding window ----------------------------------------------------------
 # With window=4, a query may only look back 4 keys. Editing a token should now
 # affect at most the next `window` positions, not the whole tail.
 with torch.no_grad():
@@ -74,5 +88,10 @@ with torch.no_grad():
     yw2 = attn(xw, cos, sin, window=4)
 changed_w = ((yw - yw2).abs().sum(dim=-1) > 1e-6)[0].int().tolist()
 print(f"[window=4] positions changed by editing token 4: {changed_w}")
+expected_w = [0] * T
+for i in range(4, 4 + 4 + 1):
+    expected_w[i] = 1
+assert changed_w == expected_w, "sliding window mask affected the wrong positions"
+print("[window=4] only token 4 and the next 4 positions changed")
 
 print("\nAll checks passed.")

@@ -15,6 +15,7 @@ What's kept (the parts that define "attention" in this repo):
 
 What's dropped (orthogonal to attention itself):
   - Flash Attention 3 kernels  -> replaced by F.scaled_dot_product_attention
+    plus a small manual attention implementation for learning
   - Value embeddings / ResFormer gate, smear, backout, per-layer lambdas
   - fp8/bf16 dtype juggling, meta-device init, the optimizer
 
@@ -40,7 +41,7 @@ def rms_norm(x):
     return F.rms_norm(x, (x.size(-1),))
 
 
-def precompute_rotary(seq_len, head_dim, base=10000.0, device="cpu"):
+def precompute_rotary(seq_len, head_dim, base=100000.0, device="cpu"):
     """Precompute the cos/sin tables that RoPE rotates Q and K by.
 
     Idea: pair up the head dimensions and treat each pair as a 2D point. At
@@ -65,8 +66,8 @@ def apply_rotary_emb(x, cos, sin):
     """Rotate the per-head vectors in x by the angles encoded in cos/sin.
 
     x is (B, T, H, D). We split D into two halves (x1, x2), treat them as the
-    real/imaginary parts of D/2 complex numbers, and multiply by e^{i*theta}:
-        (x1 + i x2) * (cos + i sin)  ->  (x1 cos - x2 sin) + i(x1 sin + x2 cos)
+    real/imaginary parts of D/2 complex numbers, and multiply by e^{-i*theta}:
+        (x1 + i x2) * (cos - i sin)  ->  (x1 cos + x2 sin) + i(-x1 sin + x2 cos)
     This makes the dot product q.k depend only on the *relative* position of the
     two tokens, which is exactly the inductive bias we want.
     """
@@ -76,6 +77,46 @@ def apply_rotary_emb(x, cos, sin):
     y1 = x1 * cos + x2 * sin
     y2 = -x1 * sin + x2 * cos
     return torch.cat([y1, y2], dim=3)
+
+
+def causal_window_mask(Tq, Tk, window, device):
+    """Boolean attention mask: True means this query may attend to that key."""
+    # row i is absolute query position (Tk - Tq) + i ; col j is key position j
+    row_idx = (Tk - Tq) + torch.arange(Tq, device=device).unsqueeze(1)
+    col_idx = torch.arange(Tk, device=device).unsqueeze(0)
+    mask = col_idx <= row_idx                       # causal: can't see the future
+    if 0 <= window < Tk:
+        mask = mask & ((row_idx - col_idx) <= window)  # and not too far in the past
+    return mask
+
+
+def repeat_kv_for_gqa(k, v, n_q_heads):
+    """Repeat K/V heads so manual attention can emulate Grouped-Query Attention."""
+    if k.size(1) == n_q_heads:
+        return k, v
+    assert n_q_heads % k.size(1) == 0
+    repeats = n_q_heads // k.size(1)
+    return k.repeat_interleave(repeats, dim=1), v.repeat_interleave(repeats, dim=1)
+
+
+def manual_attention(q, k, v, window, enable_gqa):
+    """The attention formula written out directly.
+
+    This is the clearest version to study:
+        softmax((Q K^T) / sqrt(head_dim) + mask) V
+
+    Inputs and output are (B, H, T, D). It is intentionally less efficient than
+    PyTorch SDPA because it materializes the full (Tq x Tk) score matrix.
+    """
+    if enable_gqa:
+        k, v = repeat_kv_for_gqa(k, v, q.size(1))
+
+    scores = q @ k.transpose(-2, -1)
+    scores = scores / math.sqrt(q.size(-1))
+    mask = causal_window_mask(q.size(2), k.size(2), window, q.device)
+    scores = scores.masked_fill(~mask, -torch.inf)
+    weights = F.softmax(scores, dim=-1)
+    return weights @ v
 
 
 def sdpa(q, k, v, window, enable_gqa):
@@ -96,13 +137,7 @@ def sdpa(q, k, v, window, enable_gqa):
 
     # General path: build an explicit boolean mask. This also covers KV-cache
     # decoding, where Tq (new tokens) != Tk (everything seen so far).
-    device = q.device
-    # row i is absolute query position (Tk - Tq) + i ; col j is key position j
-    row_idx = (Tk - Tq) + torch.arange(Tq, device=device).unsqueeze(1)
-    col_idx = torch.arange(Tk, device=device).unsqueeze(0)
-    mask = col_idx <= row_idx                       # causal: can't see the future
-    if 0 <= window < Tk:
-        mask = mask & ((row_idx - col_idx) <= window)  # and not too far in the past
+    mask = causal_window_mask(Tq, Tk, window, q.device)
     return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, enable_gqa=enable_gqa)
 
 
@@ -159,7 +194,7 @@ class CausalSelfAttention(nn.Module):
         self.c_v = nn.Linear(n_embd, n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
 
-    def forward(self, x, cos, sin, window=-1, kv_cache=None):
+    def forward(self, x, cos, sin, window=-1, kv_cache=None, use_manual=False):
         B, T, C = x.size()
 
         # 1) Project to queries, keys, values and split into heads.
@@ -186,7 +221,10 @@ class CausalSelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         enable_gqa = self.n_kv_head != self.n_head
-        y = sdpa(q, k, v, window, enable_gqa)
+        if use_manual:
+            y = manual_attention(q, k, v, window, enable_gqa)
+        else:
+            y = sdpa(q, k, v, window, enable_gqa)
         y = y.transpose(1, 2)                       # back to (B, T, H, D)
 
         # 6) Concatenate heads and project back into the residual stream.

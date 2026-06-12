@@ -2,25 +2,38 @@
 
 > *Interview prompt: "Pull the attention out of this repo and explain it."*
 
-This folder is my answer. I took the attention layer out of `nanochat/gpt.py`,
-stripped away everything that isn't attention (the optimizer, dtype plumbing,
-value-embedding gates, the Flash-Attention kernel), and rebuilt it as a single
-pure-PyTorch file that runs on a laptop CPU.
+This folder has two small attention implementations for learning, plus the
+nanochat-specific extraction:
 
 ```
 learning/attention/
-├── README.md      ← this write-up
-├── attention.py   ← the extracted layer (~180 lines, runs on CPU)
-└── demo.py        ← runnable checks: shapes, causality, KV cache, sliding window
+├── vanilla-attention/  ← unmasked scaled dot-product attention
+├── causal-attention/   ← vanilla attention + a causal mask
+├── README.md           ← this write-up
+├── attention.py        ← nanochat extraction + manual attention backend
+└── demo.py             ← nanochat checks: shapes, causality, KV cache, sliding window
 ```
 
-Run it:
+Start with the small examples:
+
+```bash
+cd learning/attention/vanilla-attention
+python demo.py
+
+cd ../causal-attention
+python demo.py
+```
+
+Then run the nanochat-style extraction:
 
 ```bash
 pip install torch      # not vendored in this repo
 cd learning/attention
 python demo.py
 ```
+
+The rest of this README explains the nanochat extraction. The subfolder READMEs
+explain the simpler vanilla and causal versions directly.
 
 ---
 
@@ -68,9 +81,21 @@ attn(Q, K, V) = softmax( Q Kᵀ / √d  +  mask ) V
 vector and concatenate, so different heads can specialize (syntax, coreference,
 position, …).
 
-This repo never materializes that (T × T) matrix in Python — Flash Attention /
-SDPA fuse the whole expression into one kernel — but the math is exactly the
-above.
+For learning, `attention.py` includes `manual_attention()`, which writes this
+formula out directly. The layer defaults to PyTorch SDPA because that is closer
+to the repo's production path, but `demo.py` checks that the manual version and
+SDPA agree.
+
+```python
+scores = q @ k.transpose(-2, -1) / sqrt(head_dim)
+scores = scores.masked_fill(~mask, -inf)
+weights = softmax(scores, dim=-1)
+out = weights @ v
+```
+
+The production repo never materializes that (T × T) matrix in Python — Flash
+Attention / SDPA fuse the whole expression into one kernel — but the math is
+exactly the same.
 
 ---
 
@@ -87,7 +112,8 @@ invariant — it has no idea what order tokens came in. RoPE fixes this by
 rotation by `θ_i` on the query and `θ_j` on the key leaves their dot product
 depending only on `θ_i − θ_j`, the model sees **relative** position for free.
 That's why there are no learned positional embeddings anywhere in this model.
-(Note: RoPE rotates `q` and `k` only — never `v`.)
+(Note: RoPE rotates `q` and `k` only — never `v`.) This extraction matches
+nanochat's RoPE base of `100000`.
 
 **3. QK-norm.** Before the dot product we RMS-normalize each query and key
 vector. This caps how large the attention logits can get, which keeps training
@@ -124,7 +150,7 @@ the whole stored history. This is the single biggest reason transformer
 inference is tractable, and it's also *why* GQA matters: the cache is what eats
 memory bandwidth, so making it smaller directly speeds up decoding.
 
-`demo.py`'s third check feeds a sequence through the cache one token at a time
+`demo.py`'s fourth check feeds a sequence through the cache one token at a time
 and confirms it reproduces the full-sequence forward pass to within `1e-4`.
 
 ---
