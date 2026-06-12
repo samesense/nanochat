@@ -5,11 +5,11 @@ Stripped to the bone so the matrix math is the only thing on screen: no batch
 axis, no head axis, no transposes to undo. Everything is a 2D matrix.
 
 Shapes throughout (T = number of tokens, C = embedding dim):
-    x        (T, C)     input: one row per token
+    x        (T, C)     input: one row per token; embedding lookup at the 1st layer
     q, k, v  (T, C)     each token's query / key / value
     scores   (T, T)     scores[i, j] = how much token i attends to token j
     weights  (T, T)     scores after softmax over each row (rows sum to 1)
-    out      (T, C)     weights @ v: each token's new representation
+    out      (T, C)     weights @ v: each token's new representation; new contextualized representation of each token (do not call embedding)
 
 Read `attention()` top to bottom; that is the whole idea.
 """
