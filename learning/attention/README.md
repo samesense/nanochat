@@ -2,22 +2,26 @@
 
 > *Interview prompt: "Pull the attention out of this repo and explain it."*
 
-This folder has two small attention implementations for learning, plus the
+This folder has three small attention implementations for learning, plus the
 nanochat-specific extraction:
 
 ```
 learning/attention/
-├── vanilla-attention/  ← unmasked scaled dot-product attention
-├── causal-attention/   ← vanilla attention + a causal mask
-├── README.md           ← this write-up
-├── attention.py        ← nanochat extraction + manual attention backend
-└── demo.py             ← nanochat checks: shapes, causality, KV cache, sliding window
+├── single-head-attention/  ← one batch, one head, plain 2D matrices (start here)
+├── vanilla-attention/      ← multi-head, batched, unmasked
+├── causal-attention/       ← vanilla attention + a causal mask
+├── README.md               ← this write-up
+├── attention.py            ← nanochat extraction + manual attention backend
+└── demo.py                 ← nanochat checks: shapes, causality, KV cache, sliding window
 ```
 
-Start with the small examples:
+Start with the small examples, simplest first:
 
 ```bash
-cd learning/attention/vanilla-attention
+cd learning/attention/single-head-attention
+python demo.py
+
+cd ../vanilla-attention
 python demo.py
 
 cd ../causal-attention
@@ -33,7 +37,7 @@ python demo.py
 ```
 
 The rest of this README explains the nanochat extraction. The subfolder READMEs
-explain the simpler vanilla and causal versions directly.
+explain the simpler single-head, vanilla, and causal versions directly.
 
 ---
 
